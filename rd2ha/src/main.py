@@ -6,8 +6,7 @@ import time
 from .config import Config
 from .models import PortalDevice, PortalReading
 from .mqtt_publish import MqttPublisher
-from .parser import parse_device_reading
-from .scraper import scrape_device_text
+from .scraper import scrape_device_reading
 
 LOGGER = logging.getLogger(__name__)
 MQTT_RETRY_MAX_SECONDS = 60
@@ -21,12 +20,7 @@ def configure_logging() -> None:
 
 
 def read_device_reading(config: Config, device: PortalDevice) -> PortalReading:
-    text = scrape_device_text(config, device)
-    return parse_device_reading(
-        text,
-        timezone_name=config.timezone,
-        device=device,
-    )
+    return scrape_device_reading(config, device)
 
 
 def run_cycle(config: Config, publisher: MqttPublisher) -> bool:

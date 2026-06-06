@@ -213,7 +213,7 @@ class Config:
             tanklevels_email=_env("TANKLEVELS_EMAIL"),
             tanklevels_password=_env("TANKLEVELS_PASSWORD"),
             tanklevels_device_url=tanklevels_device_url,
-            mqtt_host=_env("MQTT_HOST", "core-mosquitto"),
+            mqtt_host=_env("MQTT_HOST", "homeassistant.local"),
             mqtt_port=_env_int("MQTT_PORT", 1883),
             mqtt_username=_env("MQTT_USERNAME"),
             mqtt_password=_env("MQTT_PASSWORD"),
@@ -226,7 +226,7 @@ class Config:
             device_type=device_type,
             timezone=_env("TIMEZONE", "Europe/London"),
             storage_state_path=Path(
-                _env("PLAYWRIGHT_STORAGE_STATE", "/config/storage_state.json")
+                _env("PLAYWRIGHT_STORAGE_STATE", "./data/storage_state.json")
             ),
             devices=_parse_devices(_raw_devices_config()),
             playwright_timeout_ms=_env_int("PLAYWRIGHT_TIMEOUT_MS", 45_000),

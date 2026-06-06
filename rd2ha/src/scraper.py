@@ -40,7 +40,7 @@ class TanklevelsScraper:
     def __init__(self, config: Config) -> None:
         self.config = config
 
-    def scrape_text(self, device: PortalDevice | None = None) -> str:
+    def scrape_reading(self, device: PortalDevice | None = None) -> PortalReading:
         if device is None:
             device = self.config.devices[0]
         self.config.storage_state_path.parent.mkdir(parents=True, exist_ok=True)
@@ -51,7 +51,7 @@ class TanklevelsScraper:
             finally:
                 browser.close()
 
-    def _scrape_with_browser(self, browser: Browser, device: PortalDevice) -> str:
+    def _scrape_with_browser(self, browser: Browser, device: PortalDevice) -> PortalReading:
         context = self._context_from_saved_state(browser)
         if context:
             try:
@@ -64,9 +64,9 @@ class TanklevelsScraper:
 
         context = self._login_context(browser)
         try:
-            text = self._read_device_page(context, device)
+            reading = self._read_device_page(context, device)
             self._save_storage_state(context)
-            return text
+            return reading
         finally:
             context.close()
 
@@ -148,7 +148,7 @@ class TanklevelsScraper:
 
         raise LoginError("Tanklevels login form did not complete")
 
-    def _read_device_page(self, context: BrowserContext, device: PortalDevice) -> str:
+    def _read_device_page(self, context: BrowserContext, device: PortalDevice) -> PortalReading:
         page = context.new_page()
         page.goto(
             device.device_url,
@@ -158,17 +158,21 @@ class TanklevelsScraper:
         if self._is_auth_challenge(page):
             raise AuthExpiredError("Tanklevels device page requires login")
 
-        return self._wait_for_stable_device_text(page, device)
+        return self._wait_for_stable_reading(page, device)
 
-    def _wait_for_stable_device_text(self, page: Page, device: PortalDevice) -> str:
+    def _wait_for_stable_reading(self, page: Page, device: PortalDevice) -> PortalReading:
         deadline = time.monotonic() + (self.config.playwright_timeout_ms / 1_000)
         last_fingerprint: tuple[tuple[str, object], ...] | None = None
         stable_since: float | None = None
         last_parse_error: PortalParseError | None = None
+        last_page_error: PlaywrightError | None = None
 
         while time.monotonic() < deadline:
-            text = self._body_text(page)
+            text, page_error = self._body_text(page)
+            if page_error is not None:
+                last_page_error = page_error
             if text.strip():
+                last_page_error = None
                 try:
                     reading = parse_device_reading(
                         text,
@@ -178,8 +182,9 @@ class TanklevelsScraper:
                 except PortalParseError as exc:
                     last_parse_error = exc
                 else:
+                    last_parse_error = None
                     now = time.monotonic()
-                    fingerprint = self._reading_fingerprint(reading)
+                    fingerprint = reading.stable_fingerprint()
                     if fingerprint == last_fingerprint:
                         if (
                             stable_since is not None
@@ -190,42 +195,49 @@ class TanklevelsScraper:
                                 device.device_id,
                                 self.config.page_stable_seconds,
                             )
-                            return text
+                            return reading
                     else:
                         last_fingerprint = fingerprint
                         stable_since = now
                         if self.config.page_stable_seconds == 0:
-                            return text
+                            return reading
 
-            page.wait_for_timeout(self.config.page_stable_sample_interval_ms)
+            try:
+                page.wait_for_timeout(self.config.page_stable_sample_interval_ms)
+            except PlaywrightError as exc:
+                last_page_error = exc
+                break
 
-        detail = (
-            f" Last parse error: {last_parse_error}"
-            if last_parse_error is not None
-            else ""
-        )
+        detail = self._stability_error_detail(last_parse_error, last_page_error)
         raise DevicePageError(
             f"Device page did not produce a stable complete reading for {device.device_id}."
             f"{detail}"
         )
 
-    def _body_text(self, page: Page) -> str:
+    def _body_text(self, page: Page) -> tuple[str, PlaywrightError | None]:
         try:
             text = page.evaluate("document.body.innerText")
-        except PlaywrightError:
-            return ""
+        except PlaywrightError as exc:
+            return "", exc
         if not isinstance(text, str) or not text.strip():
-            return ""
-        return text
+            return "", None
+        return text, None
 
-    def _reading_fingerprint(self, reading: PortalReading) -> tuple[tuple[str, object], ...]:
-        payload = reading.to_payload()
-        excluded_keys = {"scraped_at", "source"}
-        return tuple(
-            (key, payload[key])
-            for key in sorted(payload)
-            if key not in excluded_keys
-        )
+    def _stability_error_detail(
+        self,
+        parse_error: PortalParseError | None,
+        page_error: PlaywrightError | None,
+    ) -> str:
+        details: list[str] = []
+        if parse_error is not None:
+            details.append(f"last_parse_error={parse_error}")
+        if page_error is not None:
+            details.append(
+                f"last_page_error={page_error.__class__.__name__}: {page_error}"
+            )
+        if not details:
+            return ""
+        return " " + " ".join(details)
 
     def _is_auth_challenge(self, page: Page) -> bool:
         url = page.url.lower()
@@ -280,5 +292,8 @@ class TanklevelsScraper:
         LOGGER.info("step=auth storage_state_saved=true")
 
 
-def scrape_device_text(config: Config, device: PortalDevice | None = None) -> str:
-    return TanklevelsScraper(config).scrape_text(device)
+def scrape_device_reading(
+    config: Config,
+    device: PortalDevice | None = None,
+) -> PortalReading:
+    return TanklevelsScraper(config).scrape_reading(device)

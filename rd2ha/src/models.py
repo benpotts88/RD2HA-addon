@@ -76,5 +76,12 @@ class PortalReading:
             "source": self.source,
         }
 
+    def stable_fingerprint(self) -> tuple[tuple[str, object], ...]:
+        return (
+            *tuple((key, self.values[key]) for key in sorted(self.values)),
+            ("last_update", self.last_update),
+            ("raw_last_update", self.raw_last_update),
+        )
+
 
 TankReading = PortalReading
