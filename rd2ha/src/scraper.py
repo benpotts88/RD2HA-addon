@@ -155,24 +155,20 @@ class TanklevelsScraper:
             raise AuthExpiredError("Tanklevels device page requires login")
 
         try:
-            page.get_by_text(self.config.device_name, exact=False).wait_for(
-                timeout=self.config.playwright_timeout_ms
-            )
-            page.get_by_text("Last update received:", exact=False).wait_for(
-                timeout=self.config.playwright_timeout_ms
-            )
             page.wait_for_function(
                 """
                 () => {
                     const text = document.body.innerText || "";
-                    return /\\d+(?:\\.\\d+)?\\s*%/.test(text)
+                    return text.includes("Tank:")
+                        && text.includes("Last update received:")
+                        && /\\d+(?:\\.\\d+)?\\s*%/.test(text)
                         && /-?\\d+(?:\\.\\d+)?\\s*°\\s*C/.test(text);
                 }
                 """,
                 timeout=self.config.playwright_timeout_ms,
             )
         except PlaywrightTimeoutError as exc:
-            raise DevicePageError("Device page did not render expected tank text") from exc
+            raise DevicePageError("Device page did not render expected tank data") from exc
 
         text = page.evaluate("document.body.innerText")
         if not isinstance(text, str) or not text.strip():

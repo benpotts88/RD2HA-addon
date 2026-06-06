@@ -27,6 +27,8 @@ Set the add-on options with your own values:
 - `device_name`
 - `device_id`
 
+`device_name` is used for Home Assistant MQTT discovery display names. It does not need to exactly match the Tanklevels page title.
+
 For Home Assistant OS with the Mosquitto broker add-on, this default is usually correct:
 
 ```yaml
