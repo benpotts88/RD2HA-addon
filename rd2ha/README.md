@@ -75,11 +75,12 @@ Each device needs a unique `id` and `base_topic`. If `base_topic` is omitted, RD
 RD2HA waits until a rendered page parses successfully and the parsed values stop changing before it publishes MQTT state. This avoids grabbing a partially populated device view.
 
 ```yaml
+page_min_ready_seconds: "12"
 page_stable_seconds: "1.5"
 page_stable_sample_interval_ms: 500
 ```
 
-Increase `page_stable_seconds` if a device page still changes after its first complete-looking render. `page_stable_sample_interval_ms` controls how often RD2HA samples the page while waiting.
+`page_min_ready_seconds` prevents RD2HA from accepting early complete-looking values while portal counters are still waiting to populate. Increase `page_stable_seconds` if a device page still changes after the minimum ready window. `page_stable_sample_interval_ms` controls how often RD2HA samples the page while waiting.
 
 ### Auth State
 

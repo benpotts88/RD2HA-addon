@@ -1,5 +1,5 @@
 name: RD2HA
-version: "0.2.2"
+version: "0.2.3"
 slug: rd2ha
 description: RainDirector / Tanklevels to Home Assistant MQTT bridge
 url: https://github.com/benpotts88/RD2HA-addon
@@ -22,6 +22,7 @@ options:
   poll_interval_seconds: 900
   playwright_headless: true
   playwright_timeout_ms: 45000
+  page_min_ready_seconds: "12"
   page_stable_seconds: "1.5"
   page_stable_sample_interval_ms: 500
   mqtt_base_topic: "raindirector/tank"
@@ -42,6 +43,7 @@ schema:
   poll_interval_seconds: int
   playwright_headless: bool
   playwright_timeout_ms: int
+  page_min_ready_seconds: str
   page_stable_seconds: str
   page_stable_sample_interval_ms: int
   mqtt_base_topic: str

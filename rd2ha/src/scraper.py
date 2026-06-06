@@ -161,7 +161,8 @@ class TanklevelsScraper:
         return self._wait_for_stable_reading(page, device)
 
     def _wait_for_stable_reading(self, page: Page, device: PortalDevice) -> PortalReading:
-        deadline = time.monotonic() + (self.config.playwright_timeout_ms / 1_000)
+        started_at = time.monotonic()
+        deadline = started_at + (self.config.playwright_timeout_ms / 1_000)
         last_fingerprint: tuple[tuple[str, object], ...] | None = None
         stable_since: float | None = None
         last_parse_error: PortalParseError | None = None
@@ -185,21 +186,24 @@ class TanklevelsScraper:
                     last_parse_error = None
                     now = time.monotonic()
                     fingerprint = reading.stable_fingerprint()
+                    observed_long_enough = self._observed_long_enough(started_at, now)
                     if fingerprint == last_fingerprint:
                         if (
                             stable_since is not None
                             and now - stable_since >= self.config.page_stable_seconds
+                            and observed_long_enough
                         ):
                             LOGGER.info(
-                                "step=device_page_ready device_id=%s stable_seconds=%s",
+                                "step=device_page_ready device_id=%s min_ready_seconds=%s stable_seconds=%s",
                                 device.device_id,
+                                self.config.page_min_ready_seconds,
                                 self.config.page_stable_seconds,
                             )
                             return reading
                     else:
                         last_fingerprint = fingerprint
                         stable_since = now
-                        if self.config.page_stable_seconds == 0:
+                        if self.config.page_stable_seconds == 0 and observed_long_enough:
                             return reading
 
             try:
@@ -222,6 +226,9 @@ class TanklevelsScraper:
         if not isinstance(text, str) or not text.strip():
             return "", None
         return text, None
+
+    def _observed_long_enough(self, started_at: float, now: float) -> bool:
+        return now - started_at >= self.config.page_min_ready_seconds
 
     def _stability_error_detail(
         self,

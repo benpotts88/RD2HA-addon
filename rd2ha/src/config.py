@@ -29,6 +29,7 @@ _ENV_TO_ADDON_OPTION = {
     "DEVICE_ID": "device_id",
     "TIMEZONE": "timezone",
     "PLAYWRIGHT_TIMEOUT_MS": "playwright_timeout_ms",
+    "PAGE_MIN_READY_SECONDS": "page_min_ready_seconds",
     "PAGE_STABLE_SECONDS": "page_stable_seconds",
     "PAGE_STABLE_SAMPLE_INTERVAL_MS": "page_stable_sample_interval_ms",
 }
@@ -174,6 +175,7 @@ class Config:
     devices: tuple[PortalDevice, ...] = ()
     login_url: str = "https://tanklevels.co.uk/login"
     playwright_timeout_ms: int = 45_000
+    page_min_ready_seconds: float = 12.0
     page_stable_seconds: float = 1.5
     page_stable_sample_interval_ms: int = 500
 
@@ -230,6 +232,7 @@ class Config:
             ),
             devices=_parse_devices(_raw_devices_config()),
             playwright_timeout_ms=_env_int("PLAYWRIGHT_TIMEOUT_MS", 45_000),
+            page_min_ready_seconds=_env_float("PAGE_MIN_READY_SECONDS", 12.0),
             page_stable_seconds=_env_float("PAGE_STABLE_SECONDS", 1.5),
             page_stable_sample_interval_ms=_env_int(
                 "PAGE_STABLE_SAMPLE_INTERVAL_MS",
@@ -270,6 +273,8 @@ class Config:
             seen_topics.add(device.mqtt_base_topic)
 
     def _validate_page_stability_settings(self) -> None:
+        if self.page_min_ready_seconds < 0:
+            raise ValueError("PAGE_MIN_READY_SECONDS must be greater than or equal to 0")
         if self.page_stable_seconds < 0:
             raise ValueError("PAGE_STABLE_SECONDS must be greater than or equal to 0")
         if self.page_stable_sample_interval_ms <= 0:
