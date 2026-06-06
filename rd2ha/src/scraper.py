@@ -14,6 +14,7 @@ from playwright.sync_api import (
 )
 
 from .config import Config
+from .models import PortalDevice
 
 LOGGER = logging.getLogger(__name__)
 
@@ -38,20 +39,22 @@ class TanklevelsScraper:
     def __init__(self, config: Config) -> None:
         self.config = config
 
-    def scrape_text(self) -> str:
+    def scrape_text(self, device: PortalDevice | None = None) -> str:
+        if device is None:
+            device = self.config.devices[0]
         self.config.storage_state_path.parent.mkdir(parents=True, exist_ok=True)
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch(headless=self.config.playwright_headless)
             try:
-                return self._scrape_with_browser(browser)
+                return self._scrape_with_browser(browser, device)
             finally:
                 browser.close()
 
-    def _scrape_with_browser(self, browser: Browser) -> str:
+    def _scrape_with_browser(self, browser: Browser, device: PortalDevice) -> str:
         context = self._context_from_saved_state(browser)
         if context:
             try:
-                return self._read_device_page(context)
+                return self._read_device_page(context, device)
             except AuthExpiredError:
                 LOGGER.warning("step=auth saved_session_expired=true")
                 self._remove_storage_state()
@@ -60,7 +63,7 @@ class TanklevelsScraper:
 
         context = self._login_context(browser)
         try:
-            text = self._read_device_page(context)
+            text = self._read_device_page(context, device)
             self._save_storage_state(context)
             return text
         finally:
@@ -144,10 +147,10 @@ class TanklevelsScraper:
 
         raise LoginError("Tanklevels login form did not complete")
 
-    def _read_device_page(self, context: BrowserContext) -> str:
+    def _read_device_page(self, context: BrowserContext, device: PortalDevice) -> str:
         page = context.new_page()
         page.goto(
-            self.config.tanklevels_device_url,
+            device.device_url,
             wait_until="domcontentloaded",
             timeout=self.config.playwright_timeout_ms,
         )
@@ -159,8 +162,7 @@ class TanklevelsScraper:
                 """
                 () => {
                     const text = document.body.innerText || "";
-                    return text.includes("Tank:")
-                        && text.includes("Last update received:")
+                    return text.includes("Last update received:")
                         && /\\d+(?:\\.\\d+)?\\s*%/.test(text)
                         && /-?\\d+(?:\\.\\d+)?\\s*°\\s*C/.test(text);
                 }
@@ -228,5 +230,5 @@ class TanklevelsScraper:
         LOGGER.info("step=auth storage_state_saved=true")
 
 
-def scrape_device_text(config: Config) -> str:
-    return TanklevelsScraper(config).scrape_text()
+def scrape_device_text(config: Config, device: PortalDevice | None = None) -> str:
+    return TanklevelsScraper(config).scrape_text(device)

@@ -4,10 +4,14 @@ import re
 from datetime import datetime
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from .models import TankReading
+from .models import PortalDevice, PortalReading
 
 
-class TankParseError(ValueError):
+class PortalParseError(ValueError):
+    """Raised when the portal text cannot be parsed into a device reading."""
+
+
+class TankParseError(PortalParseError):
     """Raised when the portal text cannot be parsed into a tank reading."""
 
 
@@ -46,7 +50,7 @@ def parse_tank_reading(
     timezone_name: str = "Europe/London",
     device_name: str | None = None,
     scraped_at: datetime | None = None,
-) -> TankReading:
+) -> PortalReading:
     lines = _non_empty_lines(text)
     level_percent, temperature_c = _extract_measurements(lines, device_name)
     tank_name = _extract_required_line_value(text, r"^Tank:\s*(?P<value>.+?)\s*$", "tank")
@@ -63,20 +67,87 @@ def parse_tank_reading(
 
     timezone = _timezone(timezone_name)
     last_update = _parse_portal_datetime(raw_last_update, timezone)
-    if scraped_at is None:
-        scraped_at = datetime.now(timezone)
-    elif scraped_at.tzinfo is None:
-        scraped_at = scraped_at.replace(tzinfo=timezone)
-
-    return TankReading(
-        level_percent=level_percent,
-        temperature_c=temperature_c,
-        tank_name=tank_name,
-        location=location,
+    return PortalReading(
+        values={
+            "level_percent": level_percent,
+            "temperature_c": temperature_c,
+            "tank_name": tank_name,
+            "location": location,
+        },
         last_update=last_update,
         raw_last_update=raw_last_update,
-        scraped_at=scraped_at,
+        scraped_at=_normalize_scraped_at(scraped_at, timezone),
     )
+
+
+def parse_rain_director_reading(
+    text: str,
+    *,
+    timezone_name: str = "Europe/London",
+    scraped_at: datetime | None = None,
+) -> PortalReading:
+    header_tank_percent = _extract_required_float(
+        text,
+        rf"^Header\s+Tank\s*:?\s*{_LEVEL_PATTERN}\s*$",
+        "header tank percentage",
+    )
+    rainwater_tank_air_temp_c = _extract_required_float(
+        text,
+        rf"^Rainwater\s+Tank\s+Air\s+Temp\.?\s*:?\s*{_TEMPERATURE_PATTERN}\s*$",
+        "rainwater tank air temperature",
+    )
+    mains_water_usage_l = _extract_required_volume_litres(
+        text,
+        r"^Total\s+mains\s+water\s+usage\s*:?\s*(?P<value>[\d,]+(?:\.\d+)?)\s*L\s*$",
+        "total mains water usage",
+    )
+    rainwater_usage_l = _extract_required_volume_litres(
+        text,
+        r"^Total\s+rainwater\s+usage\s*:?\s*(?P<value>[\d,]+(?:\.\d+)?)\s*L\s*$",
+        "total rainwater usage",
+    )
+    raw_last_update = _extract_required_line_value(
+        text,
+        r"^Last update received:\s*(?P<value>.+?)\s*$",
+        "last update",
+    )
+
+    timezone = _timezone(timezone_name)
+    last_update = _parse_portal_datetime(raw_last_update, timezone)
+    return PortalReading(
+        values={
+            "header_tank_percent": header_tank_percent,
+            "rainwater_tank_air_temp_c": rainwater_tank_air_temp_c,
+            "mains_water_usage_l": mains_water_usage_l,
+            "rainwater_usage_l": rainwater_usage_l,
+        },
+        last_update=last_update,
+        raw_last_update=raw_last_update,
+        scraped_at=_normalize_scraped_at(scraped_at, timezone),
+    )
+
+
+def parse_device_reading(
+    text: str,
+    device: PortalDevice,
+    *,
+    timezone_name: str = "Europe/London",
+    scraped_at: datetime | None = None,
+) -> PortalReading:
+    if device.device_type == "tank_level":
+        return parse_tank_reading(
+            text,
+            timezone_name=timezone_name,
+            device_name=device.device_name,
+            scraped_at=scraped_at,
+        )
+    if device.device_type == "rain_director":
+        return parse_rain_director_reading(
+            text,
+            timezone_name=timezone_name,
+            scraped_at=scraped_at,
+        )
+    raise PortalParseError(f"Unsupported device type: {device.device_type!r}")
 
 
 def _non_empty_lines(text: str) -> list[str]:
@@ -198,6 +269,27 @@ def _extract_required_line_value(text: str, pattern: str, label: str) -> str:
     return match.group("value").strip()
 
 
+def _extract_required_float(text: str, pattern: str, label: str) -> float:
+    match = re.search(pattern, text, flags=re.IGNORECASE | re.MULTILINE)
+    if not match:
+        raise TankParseError(f"Missing required field: {label}")
+    return float(match.group("value"))
+
+
+def _extract_required_volume_litres(text: str, pattern: str, label: str) -> int | float:
+    match = re.search(pattern, text, flags=re.IGNORECASE | re.MULTILINE)
+    if not match:
+        raise TankParseError(f"Missing required field: {label}")
+    return _parse_number(match.group("value"))
+
+
+def _parse_number(raw_value: str) -> int | float:
+    normalized = raw_value.replace(",", "")
+    if "." in normalized:
+        return float(normalized)
+    return int(normalized)
+
+
 def _parse_portal_datetime(raw_value: str, timezone: ZoneInfo) -> datetime:
     match = re.search(
         r"(?P<day>\d{1,2})\s+"
@@ -228,3 +320,11 @@ def _timezone(timezone_name: str) -> ZoneInfo:
         return ZoneInfo(timezone_name)
     except ZoneInfoNotFoundError as exc:
         raise TankParseError(f"Unknown timezone: {timezone_name!r}") from exc
+
+
+def _normalize_scraped_at(scraped_at: datetime | None, timezone: ZoneInfo) -> datetime:
+    if scraped_at is None:
+        return datetime.now(timezone)
+    if scraped_at.tzinfo is None:
+        return scraped_at.replace(tzinfo=timezone)
+    return scraped_at

@@ -4,9 +4,9 @@ import logging
 import time
 
 from .config import Config
-from .models import TankReading
+from .models import PortalDevice, PortalReading
 from .mqtt_publish import MqttPublisher
-from .parser import parse_tank_reading
+from .parser import parse_device_reading
 from .scraper import scrape_device_text
 
 LOGGER = logging.getLogger(__name__)
@@ -20,35 +20,42 @@ def configure_logging() -> None:
     )
 
 
-def read_tank_reading(config: Config) -> TankReading:
-    text = scrape_device_text(config)
-    return parse_tank_reading(
+def read_device_reading(config: Config, device: PortalDevice) -> PortalReading:
+    text = scrape_device_text(config, device)
+    return parse_device_reading(
         text,
         timezone_name=config.timezone,
-        device_name=config.device_name,
+        device=device,
     )
 
 
 def run_cycle(config: Config, publisher: MqttPublisher) -> bool:
-    try:
-        reading = read_tank_reading(config)
-        publisher.publish_state(reading)
-        publisher.publish_availability(True)
-    except Exception as exc:
-        LOGGER.exception(
-            "step=cycle_failed error_type=%s",
-            exc.__class__.__name__,
-        )
-        publisher.publish_availability(False)
-        return False
+    cycle_ok = True
+    for device in config.devices:
+        try:
+            reading = read_device_reading(config, device)
+            publisher.publish_state(device, reading)
+            publisher.publish_availability(device, True)
+        except Exception as exc:
+            cycle_ok = False
+            LOGGER.exception(
+                "step=device_cycle_failed device_id=%s device_type=%s error_type=%s",
+                device.device_id,
+                device.device_type,
+                exc.__class__.__name__,
+            )
+            publisher.publish_availability(device, False)
+            continue
 
-    LOGGER.info(
-        "step=cycle_complete level_percent=%s temperature_c=%s raw_last_update=%s",
-        reading.level_percent,
-        reading.temperature_c,
-        reading.raw_last_update,
-    )
-    return True
+        LOGGER.info(
+            "step=device_cycle_complete device_id=%s device_type=%s raw_last_update=%s",
+            device.device_id,
+            device.device_type,
+            reading.raw_last_update,
+        )
+
+    LOGGER.info("step=cycle_complete success=%s devices=%s", cycle_ok, len(config.devices))
+    return cycle_ok
 
 
 def run_poll_loop(config: Config, publisher: MqttPublisher) -> None:

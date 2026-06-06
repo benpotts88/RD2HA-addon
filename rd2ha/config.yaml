@@ -1,5 +1,5 @@
 name: RD2HA
-version: "0.1.1"
+version: "0.2.0"
 slug: rd2ha
 description: RainDirector / Tanklevels to Home Assistant MQTT bridge
 url: https://github.com/benpotts88/RD2HA-addon
@@ -26,6 +26,8 @@ options:
   ha_discovery_prefix: "homeassistant"
   device_name: "Tank"
   device_id: "tank"
+  device_type: "tank_level"
+  devices: []
   timezone: "Europe/London"
 schema:
   tanklevels_email: str
@@ -42,4 +44,11 @@ schema:
   ha_discovery_prefix: str
   device_name: str
   device_id: str
+  device_type: list(tank_level|rain_director)
+  devices:
+    - id: str
+      name: str
+      url: str
+      type: list(tank_level|rain_director)
+      base_topic: str?
   timezone: str

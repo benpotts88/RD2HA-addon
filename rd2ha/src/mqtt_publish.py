@@ -8,7 +8,7 @@ import logging
 import paho.mqtt.client as mqtt
 
 from .config import Config
-from .models import TankReading
+from .models import PortalDevice, PortalReading
 
 LOGGER = logging.getLogger(__name__)
 
@@ -27,7 +27,7 @@ class SensorDiscovery:
     state_class: str | None = None
 
 
-SENSOR_DISCOVERY = (
+TANK_LEVEL_SENSORS = (
     SensorDiscovery(
         object_id="level",
         name_suffix="Level",
@@ -52,13 +52,64 @@ SENSOR_DISCOVERY = (
     ),
 )
 
+RAIN_DIRECTOR_SENSORS = (
+    SensorDiscovery(
+        object_id="header_tank",
+        name_suffix="Header Tank",
+        value_template="{{ value_json.header_tank_percent }}",
+        unit_of_measurement="%",
+        device_class="moisture",
+        state_class="measurement",
+    ),
+    SensorDiscovery(
+        object_id="rainwater_tank_air_temp",
+        name_suffix="Rainwater Tank Air Temp",
+        value_template="{{ value_json.rainwater_tank_air_temp_c }}",
+        unit_of_measurement="°C",
+        device_class="temperature",
+        state_class="measurement",
+    ),
+    SensorDiscovery(
+        object_id="mains_water_usage",
+        name_suffix="Mains Water Usage",
+        value_template="{{ value_json.mains_water_usage_l }}",
+        unit_of_measurement="L",
+        device_class="water",
+        state_class="total_increasing",
+    ),
+    SensorDiscovery(
+        object_id="rainwater_usage",
+        name_suffix="Rainwater Usage",
+        value_template="{{ value_json.rainwater_usage_l }}",
+        unit_of_measurement="L",
+        device_class="water",
+        state_class="total_increasing",
+    ),
+    SensorDiscovery(
+        object_id="last_update",
+        name_suffix="Last Update",
+        value_template="{{ value_json.last_update }}",
+        device_class="timestamp",
+    ),
+)
+
+SENSORS_BY_DEVICE_TYPE = {
+    "tank_level": TANK_LEVEL_SENSORS,
+    "rain_director": RAIN_DIRECTOR_SENSORS,
+}
+
+MODEL_BY_DEVICE_TYPE = {
+    "tank_level": "Tank acculevel",
+    "rain_director": "Rain director",
+}
+
 
 class MqttPublisher:
     def __init__(self, config: Config) -> None:
         self.config = config
         self.client = mqtt.Client(
             mqtt.CallbackAPIVersion.VERSION2,
-            client_id=f"{config.device_id}_raindirector_ha",
+            client_id=f"{config.devices[0].device_id}_raindirector_ha",
         )
         if config.mqtt_username or config.mqtt_password:
             self.client.username_pw_set(
@@ -91,15 +142,15 @@ class MqttPublisher:
     def publish_discovery(self) -> None:
         for topic, payload in self.discovery_payloads().items():
             self._publish(topic, payload, retain=True)
-        LOGGER.info("step=mqtt_discovery published=true")
+        LOGGER.info("step=mqtt_discovery published=true devices=%s", len(self.config.devices))
 
-    def publish_state(self, reading: TankReading) -> None:
-        self._publish(self.config.state_topic, reading.to_payload(), retain=False)
-        LOGGER.info("step=mqtt_state published=true")
+    def publish_state(self, device: PortalDevice, reading: PortalReading) -> None:
+        self._publish(device.state_topic, reading.to_payload(), retain=False)
+        LOGGER.info("step=mqtt_state published=true device_id=%s", device.device_id)
 
-    def publish_availability(self, online: bool) -> None:
+    def publish_availability(self, device: PortalDevice, online: bool) -> None:
         self._publish(
-            self.config.availability_topic,
+            device.availability_topic,
             "online" if online else "offline",
             retain=True,
         )
@@ -118,31 +169,45 @@ class MqttPublisher:
             raise MqttPublishError(f"MQTT publish failed for {topic}: result code {info.rc}")
 
     def discovery_payloads(self) -> dict[str, dict[str, object]]:
-        device = {
-            "identifiers": [self.config.device_id],
-            "name": self.config.device_name,
+        payloads: dict[str, dict[str, object]] = {}
+        for device in self.config.devices:
+            payloads.update(self.discovery_payloads_for_device(device))
+        return payloads
+
+    def discovery_payloads_for_device(
+        self,
+        device: PortalDevice,
+    ) -> dict[str, dict[str, object]]:
+        device_metadata = {
+            "identifiers": [device.device_id],
+            "name": device.device_name,
             "manufacturer": "Black Box Controls",
-            "model": "Tank acculevel",
+            "model": MODEL_BY_DEVICE_TYPE[device.device_type],
         }
 
         return {
-            self._discovery_topic(sensor.object_id): self._sensor_payload(sensor, device)
-            for sensor in SENSOR_DISCOVERY
+            self._discovery_topic(device, sensor.object_id): self._sensor_payload(
+                sensor,
+                device,
+                device_metadata,
+            )
+            for sensor in SENSORS_BY_DEVICE_TYPE[device.device_type]
         }
 
     def _sensor_payload(
         self,
         sensor: SensorDiscovery,
-        device: dict[str, object],
+        device: PortalDevice,
+        device_metadata: dict[str, object],
     ) -> dict[str, object]:
         payload: dict[str, object] = {
-            "name": self._entity_name(sensor.name_suffix),
-            "unique_id": f"{self.config.device_id}_{sensor.object_id}",
-            "state_topic": self.config.state_topic,
-            "availability_topic": self.config.availability_topic,
+            "name": self._entity_name(device, sensor.name_suffix),
+            "unique_id": f"{device.device_id}_{sensor.object_id}",
+            "state_topic": device.state_topic,
+            "availability_topic": device.availability_topic,
             "value_template": sensor.value_template,
             "device_class": sensor.device_class,
-            "device": device,
+            "device": device_metadata,
         }
         if sensor.unit_of_measurement:
             payload["unit_of_measurement"] = sensor.unit_of_measurement
@@ -150,11 +215,11 @@ class MqttPublisher:
             payload["state_class"] = sensor.state_class
         return payload
 
-    def _entity_name(self, suffix: str) -> str:
-        return f"{self.config.device_name.replace(' - ', ' ')} {suffix}"
+    def _entity_name(self, device: PortalDevice, suffix: str) -> str:
+        return f"{device.device_name.replace(' - ', ' ')} {suffix}"
 
-    def _discovery_topic(self, object_id: str) -> str:
+    def _discovery_topic(self, device: PortalDevice, object_id: str) -> str:
         return (
             f"{self.config.ha_discovery_prefix}/sensor/"
-            f"{self.config.device_id}_{object_id}/config"
+            f"{device.device_id}_{object_id}/config"
         )

@@ -2,7 +2,7 @@
 
 Public Home Assistant OS add-on repository for RD2HA.
 
-RD2HA logs in to a configured Tanklevels device page, reads the rendered tank values with Playwright, and publishes them to Home Assistant via MQTT discovery.
+RD2HA logs in to configured Tanklevels device pages, reads rendered values with Playwright, and publishes them to Home Assistant via MQTT discovery.
 
 ## Install In Home Assistant OS
 
@@ -18,6 +18,12 @@ RD2HA logs in to a configured Tanklevels device page, reads the rendered tank va
 5. Install **RD2HA**.
 6. Configure the add-on options with your own Tanklevels and MQTT details.
 7. Start the add-on.
+
+The add-on supports:
+
+- `tank_level` device pages.
+- `rain_director` device pages.
+- Multiple devices through the `devices` list in the add-on configuration.
 
 ## Privacy
 
