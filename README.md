@@ -24,6 +24,7 @@ The add-on supports:
 - `tank_level` device pages.
 - `rain_director` device pages.
 - Multiple devices through the `devices` list in the add-on configuration.
+- Stable parsed-reading waits so partially populated pages are not published.
 
 ## Privacy
 

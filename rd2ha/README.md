@@ -70,6 +70,17 @@ devices:
 
 Each device needs a unique `id` and `base_topic`. If `base_topic` is omitted, RD2HA uses `raindirector/{id}`.
 
+### Render Stability
+
+RD2HA waits until a rendered page parses successfully and the parsed values stop changing before it publishes MQTT state. This avoids grabbing a partially populated device view.
+
+```yaml
+page_stable_seconds: "1.5"
+page_stable_sample_interval_ms: 500
+```
+
+Increase `page_stable_seconds` if a device page still changes after its first complete-looking render. `page_stable_sample_interval_ms` controls how often RD2HA samples the page while waiting.
+
 ### Auth State
 
 The add-on stores the Playwright login session at:

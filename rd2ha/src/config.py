@@ -29,6 +29,8 @@ _ENV_TO_ADDON_OPTION = {
     "DEVICE_ID": "device_id",
     "TIMEZONE": "timezone",
     "PLAYWRIGHT_TIMEOUT_MS": "playwright_timeout_ms",
+    "PAGE_STABLE_SECONDS": "page_stable_seconds",
+    "PAGE_STABLE_SAMPLE_INTERVAL_MS": "page_stable_sample_interval_ms",
 }
 
 _DEVICE_REQUIRED_FIELDS = {
@@ -70,6 +72,14 @@ def _env_int(name: str, default: int) -> int:
         return int(raw_value)
     except ValueError as exc:
         raise ValueError(f"{name} must be an integer, got {raw_value!r}") from exc
+
+
+def _env_float(name: str, default: float) -> float:
+    raw_value = _env(name, str(default))
+    try:
+        return float(raw_value)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a number, got {raw_value!r}") from exc
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -164,6 +174,8 @@ class Config:
     devices: tuple[PortalDevice, ...] = ()
     login_url: str = "https://tanklevels.co.uk/login"
     playwright_timeout_ms: int = 45_000
+    page_stable_seconds: float = 1.5
+    page_stable_sample_interval_ms: int = 500
 
     def __post_init__(self) -> None:
         if not self.devices:
@@ -181,6 +193,7 @@ class Config:
                 ),
             )
         self._validate_unique_devices()
+        self._validate_page_stability_settings()
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -217,6 +230,11 @@ class Config:
             ),
             devices=_parse_devices(_raw_devices_config()),
             playwright_timeout_ms=_env_int("PLAYWRIGHT_TIMEOUT_MS", 45_000),
+            page_stable_seconds=_env_float("PAGE_STABLE_SECONDS", 1.5),
+            page_stable_sample_interval_ms=_env_int(
+                "PAGE_STABLE_SAMPLE_INTERVAL_MS",
+                500,
+            ),
         )
 
     @property
@@ -250,3 +268,9 @@ class Config:
                 raise ValueError(f"Duplicate MQTT base topic: {device.mqtt_base_topic!r}")
             seen_ids.add(device.device_id)
             seen_topics.add(device.mqtt_base_topic)
+
+    def _validate_page_stability_settings(self) -> None:
+        if self.page_stable_seconds < 0:
+            raise ValueError("PAGE_STABLE_SECONDS must be greater than or equal to 0")
+        if self.page_stable_sample_interval_ms <= 0:
+            raise ValueError("PAGE_STABLE_SAMPLE_INTERVAL_MS must be greater than 0")

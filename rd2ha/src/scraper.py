@@ -3,18 +3,19 @@ from __future__ import annotations
 import logging
 import os
 import stat
+import time
 
 from playwright.sync_api import (
     Browser,
     BrowserContext,
     Error as PlaywrightError,
     Page,
-    TimeoutError as PlaywrightTimeoutError,
     sync_playwright,
 )
 
 from .config import Config
-from .models import PortalDevice
+from .models import PortalDevice, PortalReading
+from .parser import PortalParseError, parse_device_reading
 
 LOGGER = logging.getLogger(__name__)
 
@@ -157,25 +158,74 @@ class TanklevelsScraper:
         if self._is_auth_challenge(page):
             raise AuthExpiredError("Tanklevels device page requires login")
 
-        try:
-            page.wait_for_function(
-                """
-                () => {
-                    const text = document.body.innerText || "";
-                    return text.includes("Last update received:")
-                        && /\\d+(?:\\.\\d+)?\\s*%/.test(text)
-                        && /-?\\d+(?:\\.\\d+)?\\s*°\\s*C/.test(text);
-                }
-                """,
-                timeout=self.config.playwright_timeout_ms,
-            )
-        except PlaywrightTimeoutError as exc:
-            raise DevicePageError("Device page did not render expected tank data") from exc
+        return self._wait_for_stable_device_text(page, device)
 
-        text = page.evaluate("document.body.innerText")
+    def _wait_for_stable_device_text(self, page: Page, device: PortalDevice) -> str:
+        deadline = time.monotonic() + (self.config.playwright_timeout_ms / 1_000)
+        last_fingerprint: tuple[tuple[str, object], ...] | None = None
+        stable_since: float | None = None
+        last_parse_error: PortalParseError | None = None
+
+        while time.monotonic() < deadline:
+            text = self._body_text(page)
+            if text.strip():
+                try:
+                    reading = parse_device_reading(
+                        text,
+                        device,
+                        timezone_name=self.config.timezone,
+                    )
+                except PortalParseError as exc:
+                    last_parse_error = exc
+                else:
+                    now = time.monotonic()
+                    fingerprint = self._reading_fingerprint(reading)
+                    if fingerprint == last_fingerprint:
+                        if (
+                            stable_since is not None
+                            and now - stable_since >= self.config.page_stable_seconds
+                        ):
+                            LOGGER.info(
+                                "step=device_page_ready device_id=%s stable_seconds=%s",
+                                device.device_id,
+                                self.config.page_stable_seconds,
+                            )
+                            return text
+                    else:
+                        last_fingerprint = fingerprint
+                        stable_since = now
+                        if self.config.page_stable_seconds == 0:
+                            return text
+
+            page.wait_for_timeout(self.config.page_stable_sample_interval_ms)
+
+        detail = (
+            f" Last parse error: {last_parse_error}"
+            if last_parse_error is not None
+            else ""
+        )
+        raise DevicePageError(
+            f"Device page did not produce a stable complete reading for {device.device_id}."
+            f"{detail}"
+        )
+
+    def _body_text(self, page: Page) -> str:
+        try:
+            text = page.evaluate("document.body.innerText")
+        except PlaywrightError:
+            return ""
         if not isinstance(text, str) or not text.strip():
-            raise DevicePageError("Device page body text was empty")
+            return ""
         return text
+
+    def _reading_fingerprint(self, reading: PortalReading) -> tuple[tuple[str, object], ...]:
+        payload = reading.to_payload()
+        excluded_keys = {"scraped_at", "source"}
+        return tuple(
+            (key, payload[key])
+            for key in sorted(payload)
+            if key not in excluded_keys
+        )
 
     def _is_auth_challenge(self, page: Page) -> bool:
         url = page.url.lower()
