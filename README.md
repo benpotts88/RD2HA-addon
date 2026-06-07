@@ -24,6 +24,7 @@ The add-on supports:
 - `tank_level` device pages.
 - `rain_director` device pages.
 - Multiple devices through the `devices` list in the add-on configuration.
+- Backwards-compatible preservation of a configured single-device tank when extra devices are added.
 - Stable parsed-reading waits so delayed portal counters are not published at their initial values.
 
 ## Privacy

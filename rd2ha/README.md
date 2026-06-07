@@ -52,7 +52,9 @@ Use a stable `device_id`, because Home Assistant uses it in MQTT discovery uniqu
 
 ### Multiple Devices
 
-For more than one Tanklevels page, populate `devices`. When `devices` is not empty, it overrides the single-device `tanklevels_device_url`, `device_name`, `device_id`, `device_type`, and `mqtt_base_topic` fields.
+For more than one Tanklevels page, populate `devices`. On a fresh multi-device setup where `tanklevels_device_url` is still the placeholder, `devices` defines the complete device list.
+
+For upgrades from a single-device setup, RD2HA keeps the configured single-device tank active automatically when `tanklevels_device_url` is a real Tanklevels URL. It only skips that legacy device when a `devices` entry already uses the same `id`, URL, or `base_topic`.
 
 ```yaml
 devices:

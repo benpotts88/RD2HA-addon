@@ -1,5 +1,5 @@
 name: RD2HA
-version: "0.2.3"
+version: "0.2.4"
 slug: rd2ha
 description: RainDirector / Tanklevels to Home Assistant MQTT bridge
 url: https://github.com/benpotts88/RD2HA-addon

@@ -12,6 +12,8 @@ try:
 except ImportError:  # pragma: no cover - dependency is present in normal runtime
     load_dotenv = None
 
+DEFAULT_DEVICE_URL = "https://tanklevels.co.uk/devices/CHANGE_ME"
+
 _ENV_TO_ADDON_OPTION = {
     "TANKLEVELS_EMAIL": "tanklevels_email",
     "TANKLEVELS_PASSWORD": "tanklevels_password",
@@ -180,20 +182,12 @@ class Config:
     page_stable_sample_interval_ms: int = 500
 
     def __post_init__(self) -> None:
-        if not self.devices:
-            object.__setattr__(
-                self,
-                "devices",
-                (
-                    PortalDevice(
-                        device_id=self.device_id,
-                        device_name=self.device_name,
-                        device_url=self.tanklevels_device_url,
-                        device_type=self.device_type,
-                        mqtt_base_topic=self.mqtt_base_topic,
-                    ),
-                ),
-            )
+        legacy_device = self._legacy_device()
+        object.__setattr__(
+            self,
+            "devices",
+            self._effective_devices(legacy_device),
+        )
         self._validate_unique_devices()
         self._validate_page_stability_settings()
 
@@ -204,7 +198,7 @@ class Config:
 
         tanklevels_device_url = _env(
             "TANKLEVELS_DEVICE_URL",
-            "https://tanklevels.co.uk/devices/CHANGE_ME",
+            DEFAULT_DEVICE_URL,
         )
         mqtt_base_topic = _env("MQTT_BASE_TOPIC", "raindirector/tank")
         device_name = _env("DEVICE_NAME", "Tank")
@@ -279,3 +273,32 @@ class Config:
             raise ValueError("PAGE_STABLE_SECONDS must be greater than or equal to 0")
         if self.page_stable_sample_interval_ms <= 0:
             raise ValueError("PAGE_STABLE_SAMPLE_INTERVAL_MS must be greater than 0")
+
+    def _legacy_device(self) -> PortalDevice:
+        return PortalDevice(
+            device_id=self.device_id,
+            device_name=self.device_name,
+            device_url=self.tanklevels_device_url,
+            device_type=self.device_type,
+            mqtt_base_topic=self.mqtt_base_topic,
+        )
+
+    def _effective_devices(self, legacy_device: PortalDevice) -> tuple[PortalDevice, ...]:
+        if not self.devices:
+            return (legacy_device,)
+        if not self._legacy_device_is_configured(legacy_device):
+            return self.devices
+        if self._legacy_device_is_already_listed(legacy_device):
+            return self.devices
+        return (legacy_device, *self.devices)
+
+    def _legacy_device_is_configured(self, legacy_device: PortalDevice) -> bool:
+        return legacy_device.device_url != DEFAULT_DEVICE_URL
+
+    def _legacy_device_is_already_listed(self, legacy_device: PortalDevice) -> bool:
+        return any(
+            device.device_id == legacy_device.device_id
+            or device.device_url == legacy_device.device_url
+            or device.mqtt_base_topic == legacy_device.mqtt_base_topic
+            for device in self.devices
+        )
