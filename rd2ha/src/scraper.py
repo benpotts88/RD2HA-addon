@@ -56,8 +56,11 @@ class TanklevelsScraper:
         if context:
             try:
                 return self._read_device_page(context, device)
-            except AuthExpiredError:
-                LOGGER.warning("step=auth saved_session_expired=true")
+            except (AuthExpiredError, DevicePageError) as exc:
+                LOGGER.warning(
+                    "step=auth saved_session_retry_fresh_login=true reason=%s",
+                    exc.__class__.__name__,
+                )
                 self._remove_storage_state()
             finally:
                 context.close()
