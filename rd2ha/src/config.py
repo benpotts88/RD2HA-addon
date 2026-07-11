@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .models import PortalDevice
 
@@ -23,6 +26,9 @@ _ENV_TO_ADDON_OPTION = {
     "MQTT_PORT": "mqtt_port",
     "MQTT_USERNAME": "mqtt_username",
     "MQTT_PASSWORD": "mqtt_password",
+    "MQTT_CLIENT_ID": "mqtt_client_id",
+    "MQTT_BRIDGE_AVAILABILITY_TOPIC": "mqtt_bridge_availability_topic",
+    "MQTT_CONNECT_TIMEOUT_SECONDS": "mqtt_connect_timeout_seconds",
     "POLL_INTERVAL_SECONDS": "poll_interval_seconds",
     "PLAYWRIGHT_HEADLESS": "playwright_headless",
     "MQTT_BASE_TOPIC": "mqtt_base_topic",
@@ -34,6 +40,8 @@ _ENV_TO_ADDON_OPTION = {
     "PAGE_MIN_READY_SECONDS": "page_min_ready_seconds",
     "PAGE_STABLE_SECONDS": "page_stable_seconds",
     "PAGE_STABLE_SAMPLE_INTERVAL_MS": "page_stable_sample_interval_ms",
+    "MAX_READING_AGE_SECONDS": "max_reading_age_seconds",
+    "MAX_FUTURE_SKEW_SECONDS": "max_future_skew_seconds",
 }
 
 _DEVICE_REQUIRED_FIELDS = {
@@ -56,37 +64,56 @@ def _addon_options() -> dict[str, object]:
     return raw_options
 
 
-def _env(name: str, default: str = "") -> str:
+_DEVICE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
+
+
+def _env(
+    name: str,
+    default: str = "",
+    addon_options: dict[str, object] | None = None,
+) -> str:
     raw_env_value = os.getenv(name)
     if raw_env_value is not None:
         return raw_env_value.strip()
 
     option_name = _ENV_TO_ADDON_OPTION.get(name)
-    options = _addon_options()
+    options = _addon_options() if addon_options is None else addon_options
     if option_name and option_name in options and options[option_name] is not None:
         return str(options[option_name]).strip()
 
     return default.strip()
 
 
-def _env_int(name: str, default: int) -> int:
-    raw_value = _env(name, str(default))
+def _env_int(
+    name: str,
+    default: int,
+    addon_options: dict[str, object] | None = None,
+) -> int:
+    raw_value = _env(name, str(default), addon_options)
     try:
         return int(raw_value)
     except ValueError as exc:
         raise ValueError(f"{name} must be an integer, got {raw_value!r}") from exc
 
 
-def _env_float(name: str, default: float) -> float:
-    raw_value = _env(name, str(default))
+def _env_float(
+    name: str,
+    default: float,
+    addon_options: dict[str, object] | None = None,
+) -> float:
+    raw_value = _env(name, str(default), addon_options)
     try:
         return float(raw_value)
     except ValueError as exc:
         raise ValueError(f"{name} must be a number, got {raw_value!r}") from exc
 
 
-def _env_bool(name: str, default: bool) -> bool:
-    raw_value = _env(name, str(default)).lower()
+def _env_bool(
+    name: str,
+    default: bool,
+    addon_options: dict[str, object] | None = None,
+) -> bool:
+    raw_value = _env(name, str(default), addon_options).lower()
     if raw_value in {"1", "true", "yes", "y", "on"}:
         return True
     if raw_value in {"0", "false", "no", "n", "off"}:
@@ -94,7 +121,7 @@ def _env_bool(name: str, default: bool) -> bool:
     raise ValueError(f"{name} must be a boolean, got {raw_value!r}")
 
 
-def _raw_devices_config() -> object:
+def _raw_devices_config(addon_options: dict[str, object]) -> object:
     raw_env_value = os.getenv("TANKLEVELS_DEVICES_JSON")
     if raw_env_value is not None:
         raw_env_value = raw_env_value.strip()
@@ -105,7 +132,7 @@ def _raw_devices_config() -> object:
         except json.JSONDecodeError as exc:
             raise ValueError("TANKLEVELS_DEVICES_JSON must be valid JSON") from exc
 
-    return _addon_options().get("devices", [])
+    return addon_options.get("devices", [])
 
 
 def _parse_devices(raw_devices: object) -> tuple[PortalDevice, ...]:
@@ -180,6 +207,11 @@ class Config:
     page_min_ready_seconds: float = 12.0
     page_stable_seconds: float = 1.5
     page_stable_sample_interval_ms: int = 500
+    mqtt_client_id: str = ""
+    mqtt_bridge_availability_topic: str = "raindirector/bridge/availability"
+    mqtt_connect_timeout_seconds: float = 15.0
+    max_reading_age_seconds: int = 3600
+    max_future_skew_seconds: int = 300
 
     def __post_init__(self) -> None:
         legacy_device = self._legacy_device()
@@ -188,49 +220,86 @@ class Config:
             "devices",
             self._effective_devices(legacy_device),
         )
+        if not self.mqtt_client_id.strip():
+            object.__setattr__(
+                self,
+                "mqtt_client_id",
+                f"{self.devices[0].device_id}_raindirector_ha",
+            )
+        else:
+            object.__setattr__(self, "mqtt_client_id", self.mqtt_client_id.strip())
         self._validate_unique_devices()
-        self._validate_page_stability_settings()
+        self._validate()
 
     @classmethod
     def from_env(cls) -> "Config":
         if load_dotenv is not None:
             load_dotenv()
 
+        addon_options = _addon_options()
+
         tanklevels_device_url = _env(
             "TANKLEVELS_DEVICE_URL",
             DEFAULT_DEVICE_URL,
+            addon_options,
         )
-        mqtt_base_topic = _env("MQTT_BASE_TOPIC", "raindirector/tank")
-        device_name = _env("DEVICE_NAME", "Tank")
-        device_id = _env("DEVICE_ID", "tank")
-        device_type = _env("DEVICE_TYPE", "tank_level")
+        mqtt_base_topic = _env("MQTT_BASE_TOPIC", "raindirector/tank", addon_options)
+        device_name = _env("DEVICE_NAME", "Tank", addon_options)
+        device_id = _env("DEVICE_ID", "tank", addon_options)
+        device_type = _env("DEVICE_TYPE", "tank_level", addon_options)
 
         return cls(
-            tanklevels_email=_env("TANKLEVELS_EMAIL"),
-            tanklevels_password=_env("TANKLEVELS_PASSWORD"),
+            tanklevels_email=_env("TANKLEVELS_EMAIL", addon_options=addon_options),
+            tanklevels_password=_env("TANKLEVELS_PASSWORD", addon_options=addon_options),
             tanklevels_device_url=tanklevels_device_url,
-            mqtt_host=_env("MQTT_HOST", "homeassistant.local"),
-            mqtt_port=_env_int("MQTT_PORT", 1883),
-            mqtt_username=_env("MQTT_USERNAME"),
-            mqtt_password=_env("MQTT_PASSWORD"),
-            poll_interval_seconds=_env_int("POLL_INTERVAL_SECONDS", 900),
-            playwright_headless=_env_bool("PLAYWRIGHT_HEADLESS", True),
+            mqtt_host=_env("MQTT_HOST", "homeassistant.local", addon_options),
+            mqtt_port=_env_int("MQTT_PORT", 1883, addon_options),
+            mqtt_username=_env("MQTT_USERNAME", addon_options=addon_options),
+            mqtt_password=_env("MQTT_PASSWORD", addon_options=addon_options),
+            poll_interval_seconds=_env_int("POLL_INTERVAL_SECONDS", 900, addon_options),
+            playwright_headless=_env_bool("PLAYWRIGHT_HEADLESS", True, addon_options),
             mqtt_base_topic=mqtt_base_topic,
-            ha_discovery_prefix=_env("HA_DISCOVERY_PREFIX", "homeassistant"),
+            ha_discovery_prefix=_env("HA_DISCOVERY_PREFIX", "homeassistant", addon_options),
             device_name=device_name,
             device_id=device_id,
             device_type=device_type,
-            timezone=_env("TIMEZONE", "Europe/London"),
+            timezone=_env("TIMEZONE", "Europe/London", addon_options),
             storage_state_path=Path(
-                _env("PLAYWRIGHT_STORAGE_STATE", "./data/storage_state.json")
+                _env(
+                    "PLAYWRIGHT_STORAGE_STATE",
+                    "./data/storage_state.json",
+                    addon_options,
+                )
             ),
-            devices=_parse_devices(_raw_devices_config()),
-            playwright_timeout_ms=_env_int("PLAYWRIGHT_TIMEOUT_MS", 45_000),
-            page_min_ready_seconds=_env_float("PAGE_MIN_READY_SECONDS", 12.0),
-            page_stable_seconds=_env_float("PAGE_STABLE_SECONDS", 1.5),
+            devices=_parse_devices(_raw_devices_config(addon_options)),
+            playwright_timeout_ms=_env_int("PLAYWRIGHT_TIMEOUT_MS", 45_000, addon_options),
+            page_min_ready_seconds=_env_float("PAGE_MIN_READY_SECONDS", 12.0, addon_options),
+            page_stable_seconds=_env_float("PAGE_STABLE_SECONDS", 1.5, addon_options),
             page_stable_sample_interval_ms=_env_int(
                 "PAGE_STABLE_SAMPLE_INTERVAL_MS",
                 500,
+                addon_options,
+            ),
+            mqtt_client_id=_env("MQTT_CLIENT_ID", addon_options=addon_options),
+            mqtt_bridge_availability_topic=_env(
+                "MQTT_BRIDGE_AVAILABILITY_TOPIC",
+                "raindirector/bridge/availability",
+                addon_options,
+            ),
+            mqtt_connect_timeout_seconds=_env_float(
+                "MQTT_CONNECT_TIMEOUT_SECONDS",
+                15.0,
+                addon_options,
+            ),
+            max_reading_age_seconds=_env_int(
+                "MAX_READING_AGE_SECONDS",
+                3600,
+                addon_options,
+            ),
+            max_future_skew_seconds=_env_int(
+                "MAX_FUTURE_SKEW_SECONDS",
+                300,
+                addon_options,
             ),
         )
 
@@ -266,13 +335,65 @@ class Config:
             seen_ids.add(device.device_id)
             seen_topics.add(device.mqtt_base_topic)
 
-    def _validate_page_stability_settings(self) -> None:
+    def _validate(self) -> None:
+        self.require_tanklevels_credentials()
+        if not self.mqtt_host:
+            raise ValueError("MQTT_HOST must not be empty")
+        if not 1 <= self.mqtt_port <= 65_535:
+            raise ValueError("MQTT_PORT must be between 1 and 65535")
+        if self.poll_interval_seconds <= 0:
+            raise ValueError("POLL_INTERVAL_SECONDS must be greater than 0")
+        if self.playwright_timeout_ms <= 0:
+            raise ValueError("PLAYWRIGHT_TIMEOUT_MS must be greater than 0")
         if self.page_min_ready_seconds < 0:
             raise ValueError("PAGE_MIN_READY_SECONDS must be greater than or equal to 0")
         if self.page_stable_seconds < 0:
             raise ValueError("PAGE_STABLE_SECONDS must be greater than or equal to 0")
         if self.page_stable_sample_interval_ms <= 0:
             raise ValueError("PAGE_STABLE_SAMPLE_INTERVAL_MS must be greater than 0")
+        if self.page_stable_sample_interval_ms > self.playwright_timeout_ms:
+            raise ValueError(
+                "PAGE_STABLE_SAMPLE_INTERVAL_MS must not exceed PLAYWRIGHT_TIMEOUT_MS"
+            )
+        if self.mqtt_connect_timeout_seconds <= 0:
+            raise ValueError("MQTT_CONNECT_TIMEOUT_SECONDS must be greater than 0")
+        if self.max_reading_age_seconds <= 0:
+            raise ValueError("MAX_READING_AGE_SECONDS must be greater than 0")
+        if self.max_future_skew_seconds < 0:
+            raise ValueError("MAX_FUTURE_SKEW_SECONDS must be greater than or equal to 0")
+        self._validate_topic("MQTT_BRIDGE_AVAILABILITY_TOPIC", self.mqtt_bridge_availability_topic)
+        self._validate_topic("HA_DISCOVERY_PREFIX", self.ha_discovery_prefix)
+        if not self.mqtt_client_id:
+            raise ValueError("MQTT_CLIENT_ID must not be empty")
+        try:
+            ZoneInfo(self.timezone)
+        except ZoneInfoNotFoundError as exc:
+            raise ValueError(f"Unknown TIMEZONE: {self.timezone!r}") from exc
+        self._validate_url("LOGIN_URL", self.login_url)
+        for device in self.devices:
+            if not _DEVICE_ID_RE.fullmatch(device.device_id):
+                raise ValueError(
+                    f"Invalid device id {device.device_id!r}; use lowercase letters, "
+                    "numbers, underscores, or hyphens"
+                )
+            self._validate_url(f"device {device.device_id!r} URL", device.device_url)
+            self._validate_topic(
+                f"device {device.device_id!r} MQTT base topic",
+                device.mqtt_base_topic,
+            )
+
+    def _validate_url(self, label: str, value: str) -> None:
+        parsed = urlsplit(value)
+        if value == DEFAULT_DEVICE_URL or "CHANGE_ME" in value:
+            raise ValueError(f"{label} still contains the CHANGE_ME placeholder")
+        if parsed.scheme != "https" or not parsed.netloc:
+            raise ValueError(f"{label} must be an absolute HTTPS URL, got {value!r}")
+
+    def _validate_topic(self, label: str, value: str) -> None:
+        if not value.strip():
+            raise ValueError(f"{label} must not be empty")
+        if any(character in value for character in ("+", "#", "\x00")):
+            raise ValueError(f"{label} must not contain MQTT wildcard characters")
 
     def _legacy_device(self) -> PortalDevice:
         return PortalDevice(

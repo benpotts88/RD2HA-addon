@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import stat
+import tempfile
 import time
 
 from playwright.sync_api import (
@@ -32,8 +33,19 @@ class LoginError(ScraperError):
     pass
 
 
+class InvalidCredentialsError(LoginError):
+    pass
+
+
+class LoginTimeoutError(LoginError):
+    pass
+
+
 class DevicePageError(ScraperError):
     pass
+
+
+DEVICE_PAGE_ATTEMPTS = 2
 
 
 class TanklevelsScraper:
@@ -55,8 +67,8 @@ class TanklevelsScraper:
         context = self._context_from_saved_state(browser)
         if context:
             try:
-                return self._read_device_page(context, device)
-            except (AuthExpiredError, DevicePageError) as exc:
+                return self._read_device_page_with_retries(context, device)
+            except AuthExpiredError as exc:
                 LOGGER.warning(
                     "step=auth saved_session_retry_fresh_login=true reason=%s",
                     exc.__class__.__name__,
@@ -67,8 +79,8 @@ class TanklevelsScraper:
 
         context = self._login_context(browser)
         try:
-            reading = self._read_device_page(context, device)
             self._save_storage_state(context)
+            reading = self._read_device_page_with_retries(context, device)
             return reading
         finally:
             context.close()
@@ -80,7 +92,7 @@ class TanklevelsScraper:
         LOGGER.info("step=auth using_saved_state=true")
         try:
             return browser.new_context(storage_state=str(self.config.storage_state_path))
-        except PlaywrightError as exc:
+        except (OSError, PlaywrightError) as exc:
             LOGGER.warning(
                 "step=auth saved_session_load_failed=%s",
                 exc.__class__.__name__,
@@ -94,11 +106,15 @@ class TanklevelsScraper:
         context = browser.new_context()
         try:
             page = context.new_page()
-            page.goto(
+            response = page.goto(
                 self.config.login_url,
                 wait_until="domcontentloaded",
                 timeout=self.config.playwright_timeout_ms,
             )
+            if response is not None and response.status >= 400:
+                raise LoginError(
+                    f"Tanklevels login page returned HTTP {response.status}"
+                )
             self._submit_login(page)
             return context
         except Exception:
@@ -144,24 +160,89 @@ class TanklevelsScraper:
         if not clicked:
             page.keyboard.press("Enter")
 
-        for _ in range(30):
-            if not self._is_auth_challenge(page):
+        deadline = time.monotonic() + (self.config.playwright_timeout_ms / 1_000)
+        while time.monotonic() < deadline:
+            error_message = self._login_error_message(page)
+            if error_message:
+                raise InvalidCredentialsError(error_message)
+            if self._is_authenticated_page(page):
                 return
             page.wait_for_timeout(500)
 
-        raise LoginError("Tanklevels login form did not complete")
+        raise LoginTimeoutError("Tanklevels login did not reach an authenticated page")
+
+    def _is_authenticated_page(self, page: Page) -> bool:
+        if "/login" in page.url.lower():
+            return False
+        try:
+            body_text = str(page.evaluate("document.body.innerText") or "").casefold()
+        except PlaywrightError:
+            return False
+        return any(marker in body_text for marker in ("dashboard", "devices", "log out", "logout"))
+
+    def _login_error_message(self, page: Page) -> str | None:
+        try:
+            body_text = str(page.evaluate("document.body.innerText") or "").casefold()
+        except PlaywrightError:
+            return None
+        error_markers = (
+            "invalid email",
+            "invalid password",
+            "incorrect email",
+            "incorrect password",
+            "invalid login",
+            "login failed",
+        )
+        if any(marker in body_text for marker in error_markers):
+            return "Tanklevels rejected the supplied credentials"
+        return None
+
+    def _read_device_page_with_retries(
+        self,
+        context: BrowserContext,
+        device: PortalDevice,
+    ) -> PortalReading:
+        last_error: DevicePageError | PlaywrightError | None = None
+        for attempt in range(1, DEVICE_PAGE_ATTEMPTS + 1):
+            try:
+                return self._read_device_page(context, device)
+            except AuthExpiredError:
+                raise
+            except (DevicePageError, PlaywrightError) as exc:
+                last_error = exc
+                if attempt < DEVICE_PAGE_ATTEMPTS:
+                    LOGGER.warning(
+                        "step=device_page_retry device_id=%s attempt=%s error_type=%s",
+                        device.device_id,
+                        attempt + 1,
+                        exc.__class__.__name__,
+                    )
+                    time.sleep(attempt)
+
+        if isinstance(last_error, DevicePageError):
+            raise last_error
+        raise DevicePageError(
+            f"Device page navigation failed for {device.device_id}: {last_error}"
+        ) from last_error
 
     def _read_device_page(self, context: BrowserContext, device: PortalDevice) -> PortalReading:
         page = context.new_page()
-        page.goto(
-            device.device_url,
-            wait_until="domcontentloaded",
-            timeout=self.config.playwright_timeout_ms,
-        )
-        if self._is_auth_challenge(page):
-            raise AuthExpiredError("Tanklevels device page requires login")
+        try:
+            response = page.goto(
+                device.device_url,
+                wait_until="domcontentloaded",
+                timeout=self.config.playwright_timeout_ms,
+            )
+            if response is not None and response.status >= 400:
+                raise DevicePageError(
+                    f"Tanklevels device page returned HTTP {response.status}"
+                )
+            if self._is_auth_challenge(page):
+                raise AuthExpiredError("Tanklevels device page requires login")
 
-        return self._wait_for_stable_reading(page, device)
+            return self._wait_for_stable_reading(page, device)
+        finally:
+            page.close()
 
     def _wait_for_stable_reading(self, page: Page, device: PortalDevice) -> PortalReading:
         started_at = time.monotonic()
@@ -290,15 +371,37 @@ class TanklevelsScraper:
         except OSError as exc:
             LOGGER.warning("step=auth storage_state_remove_failed=%s", exc.__class__.__name__)
 
-    def _chmod_storage_state(self) -> None:
+    def _chmod_storage_state(
+        self,
+        path: os.PathLike[str] | str | None = None,
+        *,
+        strict: bool = False,
+    ) -> None:
+        target = path or self.config.storage_state_path
         try:
-            os.chmod(self.config.storage_state_path, stat.S_IRUSR | stat.S_IWUSR)
+            os.chmod(target, stat.S_IRUSR | stat.S_IWUSR)
         except OSError as exc:
+            if strict:
+                raise
             LOGGER.warning("step=auth storage_state_chmod_failed=%s", exc.__class__.__name__)
 
     def _save_storage_state(self, context: BrowserContext) -> None:
-        context.storage_state(path=str(self.config.storage_state_path))
-        self._chmod_storage_state()
+        file_descriptor, temporary_path = tempfile.mkstemp(
+            prefix=f".{self.config.storage_state_path.name}.",
+            suffix=".tmp",
+            dir=self.config.storage_state_path.parent,
+        )
+        os.close(file_descriptor)
+        try:
+            context.storage_state(path=temporary_path)
+            self._chmod_storage_state(temporary_path, strict=True)
+            os.replace(temporary_path, self.config.storage_state_path)
+        except Exception:
+            try:
+                os.unlink(temporary_path)
+            except FileNotFoundError:
+                pass
+            raise
         LOGGER.info("step=auth storage_state_saved=true")
 
 

@@ -29,7 +29,12 @@ For Home Assistant OS with the Mosquitto broker add-on, this default is usually 
 ```yaml
 mqtt_host: core-mosquitto
 mqtt_port: 1883
+mqtt_bridge_availability_topic: raindirector/bridge/availability
+mqtt_connect_timeout_seconds: "15"
 ```
+
+Set `mqtt_client_id` and `mqtt_bridge_availability_topic` to unique values if
+you run more than one RD2HA installation with overlapping device IDs.
 
 ### Single Device
 
@@ -83,6 +88,12 @@ page_stable_sample_interval_ms: 500
 ```
 
 `page_min_ready_seconds` prevents RD2HA from accepting early complete-looking values while portal counters are still waiting to populate. Increase `page_stable_seconds` if a device page still changes after the minimum ready window. `page_stable_sample_interval_ms` controls how often RD2HA samples the page while waiting.
+
+RD2HA retains the latest state, but only marks a device online when the portal
+timestamp is fresh. Configure `max_reading_age_seconds` (default `3600`) and
+`max_future_skew_seconds` (default `300`) to control that check. A retained
+bridge MQTT Last Will also marks all entities unavailable after a crash or
+broker connection loss.
 
 ### Auth State
 

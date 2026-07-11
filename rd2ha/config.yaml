@@ -1,5 +1,5 @@
 name: RD2HA
-version: "0.2.5"
+version: "0.3.0"
 slug: rd2ha
 description: RainDirector / Tanklevels to Home Assistant MQTT bridge
 url: https://github.com/benpotts88/RD2HA-addon
@@ -19,12 +19,17 @@ options:
   mqtt_port: 1883
   mqtt_username: ""
   mqtt_password: ""
+  mqtt_client_id: ""
+  mqtt_bridge_availability_topic: "raindirector/bridge/availability"
+  mqtt_connect_timeout_seconds: "15"
   poll_interval_seconds: 900
   playwright_headless: true
   playwright_timeout_ms: 45000
   page_min_ready_seconds: "12"
   page_stable_seconds: "1.5"
   page_stable_sample_interval_ms: 500
+  max_reading_age_seconds: 3600
+  max_future_skew_seconds: 300
   mqtt_base_topic: "raindirector/tank"
   ha_discovery_prefix: "homeassistant"
   device_name: "Tank"
@@ -40,12 +45,17 @@ schema:
   mqtt_port: int
   mqtt_username: str
   mqtt_password: password
+  mqtt_client_id: str
+  mqtt_bridge_availability_topic: str
+  mqtt_connect_timeout_seconds: str
   poll_interval_seconds: int
   playwright_headless: bool
   playwright_timeout_ms: int
   page_min_ready_seconds: str
   page_stable_seconds: str
   page_stable_sample_interval_ms: int
+  max_reading_age_seconds: int
+  max_future_skew_seconds: int
   mqtt_base_topic: str
   ha_discovery_prefix: str
   device_name: str
