@@ -84,11 +84,11 @@ page_stable_sample_interval_ms: 500
 
 `page_min_ready_seconds` prevents RD2HA from accepting early complete-looking values while portal counters are still waiting to populate. Increase `page_stable_seconds` if a device page still changes after the minimum ready window. `page_stable_sample_interval_ms` controls how often RD2HA samples the page while waiting.
 
-RD2HA retains the latest state, but only marks a device online when the portal
-timestamp is fresh. Configure `max_reading_age_seconds` (default `3600`) and
-`max_future_skew_seconds` (default `300`) to control that check. A retained
-bridge MQTT Last Will also marks all entities unavailable after a crash or
-broker connection loss.
+RD2HA retains accepted readings even when they are stale or a later portal read
+fails. `max_reading_age_seconds` (default `3600`) controls the Data stale
+diagnostic. `max_future_skew_seconds` (default `300`) rejects excessively future
+timestamps. The bridge MQTT Last Will makes all entities unavailable after a
+crash or broker connection loss.
 
 ### Auth State
 
@@ -122,3 +122,95 @@ requires login or repeatedly fails to load a complete device reading, it tries
 one fresh login automatically. It saves the replacement session after a
 successful page read. A fresh-session failure is reported normally, without
 looping. Stale readings do not trigger reauthentication.
+
+
+## Data freshness and diagnostics (0.4.0)
+
+Measurements keep the last accepted portal values during stale-data conditions
+and portal failures. Existing entity IDs, units, and history are preserved.
+Each device gains three enabled diagnostic binary sensors:
+
+| Entity | Meaning |
+| --- | --- |
+| Data stale | Problem when the accepted device timestamp is more than `max_reading_age_seconds` old (default one hour). Unknown until an accepted reading exists. |
+| Portal connection | Outcome of the latest completed device read; connected even when the portal reading is stale. Unknown until the first attempt completes after startup. |
+| Timestamp problem | Problem when a page supplies an invalid or excessively future timestamp. Invalid readings never replace accepted values. Unknown until a timestamp can be assessed after startup. |
+
+A portal failure preserves the previous timestamp-problem assessment. A valid
+subsequent scrape clears it. The existing Last Update entity always represents
+the physical device's timestamp, never the time RD2HA scraped the page.
+Freshness is checked every 60 seconds, including while a slow scrape is in
+progress. Polling remains sequential with the configured interval between rounds.
+All entities become unavailable while the RD2HA bridge is offline.
+
+Diagnostics use retained JSON at `<base_topic>/status`, with fields
+`data_stale`, `portal_connected`, `timestamp_problem`, `last_update`,
+`last_attempt_at`, `last_successful_scrape_at`, `reading_age_seconds`,
+`max_reading_age_seconds`, and `error_code`. Boolean nulls mean unknown.
+Error codes are `authentication`, `page_loading`, `incomplete_page`,
+`invalid_timestamp`, or `future_timestamp`; raw exception details are not sent
+to MQTT. The timestamps, age, threshold, and error code are diagnostic attributes.
+The existing `<base_topic>/availability` now indicates that an accepted reading
+exists; it no longer represents freshness or the last portal attempt.
+
+### Restart cache
+
+Accepted readings are stored atomically with private file permissions in
+`readings_cache.json`, beside the saved login file. This is
+`/config/readings_cache.json` inside the Home Assistant add-on, or
+`data/readings_cache.json` with the default local/Docker configuration.
+The file may include tank location data; it is ignored by Git.
+
+On restart, cached values are restored and freshness is recalculated before the
+bridge is marked online. Portal and timestamp diagnostics initially show unknown
+until a new read completes. Without a usable cache, measurements remain
+unavailable until the first accepted reading; stale retained broker messages do
+not bypass this check. Changing a device URL, type, ID, or MQTT base topic
+invalidates its cached entry. Renaming its display name does not. Resetting the
+login session leaves this cache intact. Cache failures are logged and do not
+prevent live publishing.
+
+### Automations and upgrade checks
+
+**Behaviour change:** automations that used measurement `unavailable` to detect
+staleness must now check Data stale. Before using a measurement to control a pump
+or valve, require a value, Data stale off, and Timestamp problem off. Unknown
+diagnostic states should fail these conditions. Example condition block (replace
+the entity IDs with those actually assigned by Home Assistant):
+
+```yaml
+conditions:
+  - condition: template
+    value_template: >-
+      {{ has_value('sensor.outdoor_tank_level')
+         and is_state('binary_sensor.outdoor_tank_data_stale', 'off')
+         and is_state('binary_sensor.outdoor_tank_timestamp_problem', 'off') }}
+```
+
+Take an add-on backup before upgrading. After installing 0.4.0, verify:
+
+1. Existing measurement entities and history remain intact.
+2. A stale tank shows its last values and Data stale on.
+3. A recent tank shows Data stale off; successful reads show Portal connection connected.
+4. Restarting the add-on restores cached readings before scraping completes.
+5. Stopping the add-on makes all its entities unavailable.
+
+### Rollback to 0.3.1
+
+Restore the pre-upgrade add-on backup. The older version returns to marking
+stale readings unavailable. Preserve `readings_cache.json` for a later upgrade
+if restoring a backup would overwrite the add-on configuration directory.
+
+Stop RD2HA before removing the new diagnostic discovery messages. In Home
+Assistant's MQTT publish tool, publish an empty payload with **retain enabled**
+to each of these three topics for each configured device (substitute the actual
+discovery prefix and device ID):
+
+```text
+homeassistant/binary_sensor/<device_id>_data_stale/config
+homeassistant/binary_sensor/<device_id>_portal_connection/config
+homeassistant/binary_sensor/<device_id>_timestamp_problem/config
+```
+
+This removes only the new diagnostic entities. Do not clear existing measurement
+configurations or state topics. Then start the older add-on.

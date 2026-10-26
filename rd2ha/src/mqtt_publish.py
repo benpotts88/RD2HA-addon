@@ -117,7 +117,7 @@ class MqttPublisher:
         self._connection_error: str | None = None
         self._connected = False
         self._loop_started = False
-        self._ever_connected = False
+        self.connection_generation = 0
         self.client = mqtt.Client(
             mqtt.CallbackAPIVersion.VERSION2,
             client_id=config.mqtt_client_id,
@@ -159,21 +159,9 @@ class MqttPublisher:
     ) -> None:
         del client, userdata, flags, properties
         if reason_code == 0:
-            self._connected = True
             self._connection_error = None
-            if self._ever_connected:
-                info = self.client.publish(
-                    self.config.mqtt_bridge_availability_topic,
-                    "online",
-                    qos=1,
-                    retain=True,
-                )
-                if info.rc != mqtt.MQTT_ERR_SUCCESS:
-                    LOGGER.error(
-                        "step=mqtt_reconnect_availability_failed result_code=%s",
-                        info.rc,
-                    )
-            self._ever_connected = True
+            self.connection_generation += 1
+            self._connected = True
             LOGGER.info("step=mqtt_connected accepted=true")
         else:
             self._connected = False
@@ -241,37 +229,17 @@ class MqttPublisher:
             self._loop_started = False
         self._connected = False
 
-    def publish_startup_availability(self) -> None:
-        for device in self.config.devices:
-            self.publish_availability(device, False)
-        self._publish(
-            self.config.mqtt_bridge_availability_topic,
-            "online",
-            retain=True,
-        )
-        LOGGER.info("step=mqtt_startup_availability published=true")
+    @property
+    def connected(self) -> bool:
+        return self._connected
+
+    def publish_bridge_availability(self, online: bool) -> None:
+        self._publish(self.config.mqtt_bridge_availability_topic,
+                      "online" if online else "offline", retain=True)
 
     def publish_shutdown_availability(self) -> None:
-        if not self._connected:
-            return
-        errors: list[MqttPublishError] = []
-        for device in self.config.devices:
-            try:
-                self.publish_availability(device, False)
-            except MqttPublishError as exc:
-                errors.append(exc)
-        try:
-            self._publish(
-                self.config.mqtt_bridge_availability_topic,
-                "offline",
-                retain=True,
-            )
-        except MqttPublishError as exc:
-            errors.append(exc)
-        if errors:
-            raise MqttPublishError(
-                f"Failed to publish {len(errors)} shutdown availability message(s)"
-            ) from errors[0]
+        if self.connected:
+            self.publish_bridge_availability(False)
 
     def publish_discovery(self) -> None:
         for topic, payload in self.discovery_payloads().items():
@@ -282,12 +250,15 @@ class MqttPublisher:
         self._publish(device.state_topic, reading.to_payload(), retain=True)
         LOGGER.info("step=mqtt_state published=true device_id=%s", device.device_id)
 
-    def publish_availability(self, device: PortalDevice, online: bool) -> None:
+    def publish_reading_availability(self, device: PortalDevice, online: bool) -> None:
         self._publish(
             device.availability_topic,
             "online" if online else "offline",
             retain=True,
         )
+
+    def publish_status(self, device: PortalDevice, payload: Mapping[str, object]) -> None:
+        self._publish(device.status_topic, payload, retain=True)
 
     def _publish(self, topic: str, payload: Mapping[str, object] | str, *, retain: bool) -> None:
         encoded_payload = (
@@ -295,6 +266,9 @@ class MqttPublisher:
             if isinstance(payload, Mapping)
             else payload
         )
+        if not self.connected:
+            raise MqttPublishError("MQTT is disconnected")
+        generation = self.connection_generation
         info = self.client.publish(topic, encoded_payload, qos=1, retain=retain)
         if info.rc != mqtt.MQTT_ERR_SUCCESS:
             raise MqttPublishError(f"MQTT publish failed for {topic}: result code {info.rc}")
@@ -302,6 +276,8 @@ class MqttPublisher:
             info.wait_for_publish(timeout=15)
         except (RuntimeError, ValueError) as exc:
             raise MqttPublishError(f"MQTT publish failed for {topic}: {exc}") from exc
+        if not self.connected or self.connection_generation != generation:
+            raise MqttPublishError("MQTT connection changed during publication")
         if not info.is_published():
             raise MqttPublishError(f"MQTT publish timed out for {topic}")
 
@@ -322,7 +298,7 @@ class MqttPublisher:
             "model": MODEL_BY_DEVICE_TYPE[device.device_type],
         }
 
-        return {
+        payloads = {
             self._discovery_topic(device, sensor.object_id): self._sensor_payload(
                 sensor,
                 device,
@@ -330,6 +306,38 @@ class MqttPublisher:
             )
             for sensor in SENSORS_BY_DEVICE_TYPE[device.device_type]
         }
+
+        for suffix, name, field, device_class in (
+            ("data_stale", "Data stale", "data_stale", "problem"),
+            ("portal_connection", "Portal connection", "portal_connected", "connectivity"),
+            ("timestamp_problem", "Timestamp problem", "timestamp_problem", "problem"),
+        ):
+            topic = f"{self.config.ha_discovery_prefix}/binary_sensor/{device.device_id}_{suffix}/config"
+            payloads[topic] = {
+                "name": self._entity_name(device, name),
+                "unique_id": f"{device.device_id}_{suffix}",
+                "device": device_metadata,
+                "device_class": device_class,
+                "entity_category": "diagnostic",
+                "enabled_by_default": True,
+                "state_topic": device.status_topic,
+                "value_template": ("{{ 'None' if value_json." + field
+                                   + " is none else ('ON' if value_json." + field + " else 'OFF') }}"),
+                "payload_on": "ON", "payload_off": "OFF",
+                "availability_topic": self.config.mqtt_bridge_availability_topic,
+                "payload_available": "online", "payload_not_available": "offline",
+                "json_attributes_topic": device.status_topic,
+                "json_attributes_template": (
+                    "{{ dict(last_update=value_json.last_update, "
+                    "last_attempt_at=value_json.last_attempt_at, "
+                    "last_successful_scrape_at=value_json.last_successful_scrape_at, "
+                    "reading_age_seconds=value_json.reading_age_seconds, "
+                    "max_reading_age_seconds=value_json.max_reading_age_seconds, "
+                    "error_code=value_json.error_code) | tojson }}"
+                ),
+                "qos": 1,
+            }
+        return payloads
 
     def _sensor_payload(
         self,

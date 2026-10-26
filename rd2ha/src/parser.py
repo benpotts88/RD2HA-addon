@@ -15,6 +15,10 @@ class TankParseError(PortalParseError):
     """Raised when the portal text cannot be parsed into a tank reading."""
 
 
+class TimestampParseError(TankParseError):
+    """Measurements were read, but the device timestamp is missing or invalid."""
+
+
 _MONTHS = {
     "january": 1,
     "february": 2,
@@ -59,11 +63,7 @@ def parse_tank_reading(
         r"^Location:\s*(?P<value>[^|\n]+)",
         "location",
     )
-    raw_last_update = _extract_required_line_value(
-        text,
-        r"^Last update received:\s*(?P<value>.+?)\s*$",
-        "last update",
-    )
+    raw_last_update = _extract_timestamp_text(text)
 
     timezone = _timezone(timezone_name)
     last_update = _parse_portal_datetime(raw_last_update, timezone)
@@ -106,11 +106,7 @@ def parse_rain_director_reading(
         r"^Total\s+rainwater\s+usage\s*:?\s*(?P<value>[\d,]+(?:\.\d+)?)\s*L\s*$",
         "total rainwater usage",
     )
-    raw_last_update = _extract_required_line_value(
-        text,
-        r"^Last update received:\s*(?P<value>.+?)\s*$",
-        "last update",
-    )
+    raw_last_update = _extract_timestamp_text(text)
 
     timezone = _timezone(timezone_name)
     last_update = _parse_portal_datetime(raw_last_update, timezone)
@@ -299,20 +295,32 @@ def _parse_portal_datetime(raw_value: str, timezone: ZoneInfo) -> datetime:
         raw_value,
     )
     if not match:
-        raise TankParseError(f"Could not parse last update datetime: {raw_value!r}")
+        raise TimestampParseError("Could not parse last update datetime")
 
     month_name = match.group("month").casefold()
     if month_name not in _MONTHS:
-        raise TankParseError(f"Unknown month in last update datetime: {raw_value!r}")
+        raise TimestampParseError("Unknown month in last update datetime")
 
-    return datetime(
-        year=int(match.group("year")),
-        month=_MONTHS[month_name],
-        day=int(match.group("day")),
-        hour=int(match.group("hour")),
-        minute=int(match.group("minute")),
-        tzinfo=timezone,
-    )
+    try:
+        return datetime(
+            year=int(match.group("year")),
+            month=_MONTHS[month_name],
+            day=int(match.group("day")),
+            hour=int(match.group("hour")),
+            minute=int(match.group("minute")),
+            tzinfo=timezone,
+        )
+    except ValueError as exc:
+        raise TimestampParseError("Invalid last update datetime") from exc
+
+
+def _extract_timestamp_text(text: str) -> str:
+    try:
+        return _extract_required_line_value(
+            text, r"^Last update received:\s*(?P<value>.+?)\s*$", "last update")
+    except TankParseError as exc:
+        raise TimestampParseError("Missing required field: last update") from exc
+
 
 
 def _timezone(timezone_name: str) -> ZoneInfo:

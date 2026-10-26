@@ -16,7 +16,7 @@ from playwright.sync_api import (
 
 from .config import Config
 from .models import PortalDevice, PortalReading
-from .parser import PortalParseError, parse_device_reading
+from .parser import PortalParseError, TimestampParseError, parse_device_reading
 
 LOGGER = logging.getLogger(__name__)
 
@@ -43,6 +43,10 @@ class LoginTimeoutError(LoginError):
 
 class DevicePageError(ScraperError):
     pass
+
+
+class PageLoadError(DevicePageError):
+    """Navigation failed before a readable device page was available."""
 
 
 DEVICE_PAGE_ATTEMPTS = 2
@@ -221,7 +225,7 @@ class TanklevelsScraper:
 
         if isinstance(last_error, DevicePageError):
             raise last_error
-        raise DevicePageError(
+        raise PageLoadError(
             f"Device page navigation failed for {device.device_id}: {last_error}"
         ) from last_error
 
@@ -234,7 +238,7 @@ class TanklevelsScraper:
                 timeout=self.config.playwright_timeout_ms,
             )
             if response is not None and response.status >= 400:
-                raise DevicePageError(
+                raise PageLoadError(
                     f"Tanklevels device page returned HTTP {response.status}"
                 )
             if self._is_auth_challenge(page):
@@ -298,6 +302,8 @@ class TanklevelsScraper:
                 last_page_error = exc
                 break
 
+        if isinstance(last_parse_error, TimestampParseError) and last_page_error is None:
+            raise last_parse_error
         detail = self._stability_error_detail(last_parse_error, last_page_error)
         raise DevicePageError(
             f"Device page did not produce a stable complete reading for {device.device_id}."

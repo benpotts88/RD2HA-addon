@@ -50,6 +50,10 @@ class PortalDevice:
         return f"{self.mqtt_base_topic}/state"
 
     @property
+    def status_topic(self) -> str:
+        return f"{self.mqtt_base_topic}/status"
+
+    @property
     def availability_topic(self) -> str:
         return f"{self.mqtt_base_topic}/availability"
 
