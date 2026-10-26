@@ -7,12 +7,7 @@ Runs a RainDirector / Tanklevels portal scraper as a Home Assistant OS add-on an
 1. Open Home Assistant.
 2. Go to **Settings -> Add-ons -> Add-on Store**.
 3. Open the top-right menu and choose **Repositories**.
-4. Add this repository URL:
-
-   ```text
-   https://github.com/benpotts88/RD2HA-addon
-   ```
-
+4. Add the RD2HA add-on repository URL.
 5. Install **RD2HA**.
 
 ## Configuration
@@ -119,3 +114,11 @@ The add-on publishes Home Assistant MQTT discovery configs for:
 
 - `tank_level`: tank level, tank temperature, and last update.
 - `rain_director`: header tank level, rainwater tank air temperature, total mains water usage, total rainwater usage, and last update.
+
+### Automatic session recovery
+
+RD2HA detects login redirects while waiting for readings. If a saved session
+requires login or repeatedly fails to load a complete device reading, it tries
+one fresh login automatically. It saves the replacement session after a
+successful page read. A fresh-session failure is reported normally, without
+looping. Stale readings do not trigger reauthentication.

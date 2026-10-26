@@ -68,7 +68,7 @@ class TanklevelsScraper:
         if context:
             try:
                 return self._read_device_page_with_retries(context, device)
-            except AuthExpiredError as exc:
+            except (AuthExpiredError, DevicePageError) as exc:
                 LOGGER.warning(
                     "step=auth saved_session_retry_fresh_login=true reason=%s",
                     exc.__class__.__name__,
@@ -79,8 +79,8 @@ class TanklevelsScraper:
 
         context = self._login_context(browser)
         try:
-            self._save_storage_state(context)
             reading = self._read_device_page_with_retries(context, device)
+            self._save_storage_state(context)
             return reading
         finally:
             context.close()
@@ -253,6 +253,8 @@ class TanklevelsScraper:
         last_page_error: PlaywrightError | None = None
 
         while time.monotonic() < deadline:
+            if self._is_auth_challenge(page):
+                raise AuthExpiredError("Tanklevels device page requires login")
             text, page_error = self._body_text(page)
             if page_error is not None:
                 last_page_error = page_error
